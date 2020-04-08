@@ -219,6 +219,25 @@ func TestResourceNamer(t *testing.T) {
 	assert.Equal(staticName, spans[0].Tag(ext.ResourceName))
 }
 
+func TestPathPrefixSubconfig(t *testing.T) {
+	subServiceName := "sub-service"
+
+	assert := assert.New(t)
+	mt := mocktracer.Start()
+	defer mt.Stop()
+
+	mux := NewRouter()
+	subMux := mux.PathPrefix("/sub", WithServiceName(subServiceName)).Subrouter()
+	subMux.Handle("/200", okHandler()).Host("localhost")
+	r := httptest.NewRequest("GET", "http://localhost/sub/200", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	spans := mt.FinishedSpans()
+	assert.Equal(1, len(spans))
+	assert.Equal(subServiceName, spans[0].Tag(ext.ServiceName))
+}
+
 func router() http.Handler {
 	mux := NewRouter(WithServiceName("my-service"))
 	mux.Handle("/200", okHandler())

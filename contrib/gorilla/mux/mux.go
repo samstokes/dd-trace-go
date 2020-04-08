@@ -9,6 +9,7 @@ package mux // import "gopkg.in/DataDog/dd-trace-go.v1/contrib/gorilla/mux"
 import (
 	"math"
 	"net/http"
+	"strings"
 
 	"gopkg.in/DataDog/dd-trace-go.v1/contrib/internal/httputil"
 	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace"
@@ -21,7 +22,8 @@ import (
 // Router registers routes to be matched and dispatches a handler.
 type Router struct {
 	*mux.Router
-	config *routerConfig
+	config     *routerConfig
+	subconfigs map[string]*routerConfig
 }
 
 // StrictSlash defines the trailing slash behavior for new routes. The initial
@@ -72,20 +74,34 @@ func (r *Router) UseEncodedPath() *Router {
 	return r
 }
 
+func (r *Router) PathPrefix(prefix string, opts ...RouterOption) *mux.Route {
+	if len(opts) > 0 {
+		subcfg := *r.config
+		applyRouterOptions(&subcfg, opts)
+		r.subconfigs[prefix] = &subcfg
+	}
+	return r.Router.PathPrefix(prefix)
+}
+
 // NewRouter returns a new router instance traced with the global tracer.
 func NewRouter(opts ...RouterOption) *Router {
 	cfg := new(routerConfig)
 	defaults(cfg)
-	for _, fn := range opts {
-		fn(cfg)
-	}
+	applyRouterOptions(cfg, opts)
 	if !math.IsNaN(cfg.analyticsRate) {
 		cfg.spanOpts = append(cfg.spanOpts, tracer.Tag(ext.EventSampleRate, cfg.analyticsRate))
 	}
 	cfg.spanOpts = append(cfg.spanOpts, tracer.Measured())
 	return &Router{
-		Router: mux.NewRouter(),
-		config: cfg,
+		Router:     mux.NewRouter(),
+		config:     cfg,
+		subconfigs: map[string]*routerConfig{},
+	}
+}
+
+func applyRouterOptions(cfg *routerConfig, opts []RouterOption) {
+	for _, fn := range opts {
+		fn(cfg)
 	}
 }
 
@@ -94,6 +110,18 @@ func NewRouter(opts ...RouterOption) *Router {
 // We only need to rewrite this function to be able to trace
 // all the incoming requests to the underlying multiplexer
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	cfg := r.config
+
+	parts := strings.SplitN(req.URL.Path, "/", 3)
+	// first part should be empty string
+	if len(parts) > 1 {
+		prefix := "/" + parts[1]
+
+		if subcfg, found := r.subconfigs[prefix]; found {
+			cfg = subcfg
+		}
+	}
+
 	var (
 		match    mux.RouteMatch
 		spanopts []ddtrace.StartSpanOption
@@ -104,9 +132,9 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			spanopts = append(spanopts, tracer.Tag("mux.host", h))
 		}
 	}
-	spanopts = append(spanopts, r.config.spanOpts...)
-	resource := r.config.resourceNamer(r, req)
-	httputil.TraceAndServe(r.Router, w, req, r.config.serviceName, resource, r.config.finishOpts, spanopts...)
+	spanopts = append(spanopts, cfg.spanOpts...)
+	resource := cfg.resourceNamer(r, req)
+	httputil.TraceAndServe(r.Router, w, req, cfg.serviceName, resource, cfg.finishOpts, spanopts...)
 }
 
 // defaultResourceNamer attempts to quantize the resource for an HTTP request by
